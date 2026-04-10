@@ -6,7 +6,7 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 
 ## Quick orientation
 
-- **Stack:** Next.js 15 (App Router, TypeScript, Tailwind 4) + self-hosted Supabase + Coolify auto-deploy
+- **Stack:** Next.js 15 (App Router, TypeScript, Tailwind 4) + self-hosted Supabase + Coolify auto-deploy via Dockerfile
 - **Infra reference:** `/home/mark_harris/react/CWS-INFRASTRUCTURE.md` (read it if you need URLs, IPs, SSH commands, or to understand how deploys work)
 - **Schema = code:** all DB changes go through `supabase/migrations/`. See `AGENTS.md` for the exact loop.
 - **Typed everywhere:** the Supabase client in `src/lib/supabase.ts` is typed via the generated `src/lib/database.types.ts`. Regenerate types after every migration with `./scripts/db-types.sh`.
@@ -24,6 +24,7 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 - **Don't add a `pages/` directory.** App Router only.
 - **Don't edit `database.types.ts` by hand** — always regenerate via `./scripts/db-types.sh`.
 - **Don't commit `.env.local`** — it's gitignored and contains the Postgres password.
+- **Don't remove or break the `Dockerfile` or `.dockerignore`** — Coolify uses the Dockerfile to build and deploy this app. `next.config.ts` must keep `output: "standalone"` for the Dockerfile to work. If you add new public assets or change the build, verify the Dockerfile still copies everything needed.
 
 ## When the user describes a feature that needs data
 
