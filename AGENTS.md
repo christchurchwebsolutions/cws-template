@@ -12,27 +12,27 @@ Full infra reference: `/home/mark_harris/react/CWS-INFRASTRUCTURE.md`.
 
 ## Database changes — ALWAYS use migrations
 
-**Never** make schema changes in the Supabase Studio UI. Schema lives in git, in `supabase/migrations/`. The flow:
+**Never** make schema changes in the Supabase Studio UI. Schema lives in git, in `supabase/migrations/`. Each project uses its own **Postgres schema** (e.g. `cortex`) within the shared `postgres` database. The schema name is set via `DB_SCHEMA` in `.env.local`. The flow:
 
 1. **Create a migration file**:
    ```bash
    ./scripts/db-new-migration.sh "short description"
    ```
-   Creates `supabase/migrations/<timestamp>_<description>.sql`.
+   Creates `supabase/migrations/<timestamp>_<description>.sql` with `SET search_path TO <schema>, public;` already included.
 
-2. **Write the SQL**. Include `CREATE TABLE` / `ALTER TABLE`, indexes, and Row Level Security (`ALTER TABLE foo ENABLE ROW LEVEL SECURITY;` plus policies).
+2. **Write the SQL**. Include `CREATE TABLE` / `ALTER TABLE`, indexes, and Row Level Security (`ALTER TABLE foo ENABLE ROW LEVEL SECURITY;` plus policies). Since we're in the shared `postgres` database, you can use `auth.uid()` in RLS policies. Tables are created in the project schema automatically thanks to the `SET search_path`.
 
 3. **Apply it to the live database**:
    ```bash
    ./scripts/db-push.sh
    ```
-   Opens an SSH tunnel to the Supabase server and runs `supabase db push`.
+   SSHs to the Supabase server and runs the migration against the `postgres` database.
 
 4. **Regenerate TypeScript types**:
    ```bash
    ./scripts/db-types.sh
    ```
-   Writes `src/lib/database.types.ts`. Use these types in the Supabase client:
+   Writes `src/lib/database.types.ts` from the project schema. Use these types in the Supabase client:
    ```ts
    import type { Database } from '@/lib/database.types'
    import { createClient } from '@supabase/supabase-js'

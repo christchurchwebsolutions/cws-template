@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate TypeScript types from the live Supabase database for THIS project.
+# Generate TypeScript types from the project's schema in the postgres database.
 # Output:  src/lib/database.types.ts
 #
 # How it works: SSH to the Supabase server and run a one-shot postgres-meta
@@ -25,18 +25,20 @@ source .env.local
 : "${PG_META_IMAGE:=public.ecr.aws/supabase/postgres-meta:v0.96.1}"
 : "${SUPABASE_NETWORK:=supabase_default}"
 : "${SUPABASE_DB_HOST:=supabase-db}"
-: "${DB_NAME:?Set DB_NAME in .env.local}"
+: "${DB_SCHEMA:?Set DB_SCHEMA in .env.local}"
 : "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.local}"
 
-DB_URL="postgresql://${SUPABASE_DB_USER}:${POSTGRES_PASSWORD}@${SUPABASE_DB_HOST}:5432/${DB_NAME}"
+DB_URL="postgresql://${SUPABASE_DB_USER}:${POSTGRES_PASSWORD}@${SUPABASE_DB_HOST}:5432/postgres"
 
 mkdir -p src/lib
 
-echo "Generating types from ${DB_NAME}..."
+echo "Generating types from schema '${DB_SCHEMA}' in postgres..."
 ssh "${SUPABASE_HOST}" \
   "docker run --rm --network ${SUPABASE_NETWORK} \
     -e PG_META_DB_URL='${DB_URL}' \
+    -e PG_META_DB_SCHEMAS='${DB_SCHEMA}' \
     -e PG_META_GENERATE_TYPES=typescript \
+    -e PG_META_GENERATE_TYPES_INCLUDED_SCHEMAS='${DB_SCHEMA}' \
     ${PG_META_IMAGE} node dist/server/server.js" \
   > src/lib/database.types.ts
 

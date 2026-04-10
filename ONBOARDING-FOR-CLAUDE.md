@@ -169,12 +169,12 @@ Expected: `supabase`. Failure modes:
 - `Permission denied (publickey)` → tell Jo *"The server isn't accepting your key yet — Mark either hasn't added it or added it wrong. Please double-check with Mark."* Go back to Step 5.
 - `Connection timed out` → network issue, retry once.
 
-Now the **real** smoke test — can we list databases through the same channel the migration scripts will use?
+Now the **real** smoke test — can we list schemas through the same channel the migration scripts will use?
 ```bash
-ssh root@91.99.87.214 "docker exec -i supabase-db psql -U supabase_admin -d postgres -c '\\l' | head -20"
+ssh root@91.99.87.214 "docker exec -i supabase-db psql -U supabase_admin -d postgres -c '\\dn' | head -20"
 ```
 
-If this prints a table of databases (you should see `cws_template` and possibly others), the migration tooling will work. ✅
+If this prints a list of schemas (you should see `public`, `auth`, `storage`, and any project schemas like `cortex`), the migration tooling will work. ✅
 
 If it fails, do **not** continue — the database scripts won't work either. Show Jo a friendly version of the error and ask her to flag it to Mark.
 

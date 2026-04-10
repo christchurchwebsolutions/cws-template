@@ -9,6 +9,7 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 - **Stack:** Next.js 15 (App Router, TypeScript, Tailwind 4) + self-hosted Supabase + Coolify auto-deploy via Dockerfile
 - **Infra reference:** `/home/mark_harris/react/CWS-INFRASTRUCTURE.md` (read it if you need URLs, IPs, SSH commands, or to understand how deploys work)
 - **Schema = code:** all DB changes go through `supabase/migrations/`. See `AGENTS.md` for the exact loop.
+- **Per-project schema:** each project gets its own Postgres schema (e.g. `cortex`) within the shared `postgres` database. This gives us Supabase Studio visibility, `auth.uid()` for RLS, and access to realtime/storage. The schema name is in `DB_SCHEMA` in `.env.local`. Migrations auto-set `search_path` to the project schema.
 - **Typed everywhere:** the Supabase client in `src/lib/supabase.ts` is typed via the generated `src/lib/database.types.ts`. Regenerate types after every migration with `./scripts/db-types.sh`.
 
 ## Skills available
@@ -29,13 +30,13 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 ## When the user describes a feature that needs data
 
 Default sequence:
-1. Design the schema (tables, columns, constraints, indexes, RLS policies)
+1. Design the tables, columns, constraints, indexes, and RLS policies
 2. Create a migration: `./scripts/db-new-migration.sh "describe the change"`
-3. Write the SQL in the new migration file
+3. Write the SQL in the new migration file. The template already includes `SET search_path TO <schema>, public;` — your `CREATE TABLE`, `ALTER TABLE`, etc. land in the project schema automatically. For RLS policies, you can reference `auth.uid()` since we're in the shared `postgres` database with Supabase auth.
 4. Apply: `./scripts/db-push.sh`
 5. Regenerate types: `./scripts/db-types.sh`
 6. Build the UI/API code using the new types
 7. Commit migration + types + code together
-8. The user pushes via GitHub Desktop — Coolify auto-deploys
+8. Push to GitHub — Coolify auto-deploys
 
 This way the deployed code never hits a database that doesn't yet have its tables.
