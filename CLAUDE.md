@@ -40,3 +40,33 @@ Default sequence:
 8. Push to GitHub — Coolify auto-deploys
 
 This way the deployed code never hits a database that doesn't yet have its tables.
+
+## Auth — DO NOT use GoTrue emails
+
+**This is a hard-won lesson from another CWS project.** If this project needs user authentication with email flows (signup confirmation, password reset, email verification):
+
+**DO NOT rely on Supabase GoTrue's built-in email templates.** They are broken on self-hosted:
+- Templates don't reliably load
+- Confirmation links point at Studio URL instead of the app
+- Templates are server-wide (can't brand per-project on shared Supabase)
+
+**Instead, use this pattern:**
+1. Set `AUTOCONFIRM=true` on GoTrue — signups are instant, no email confirmation step
+2. Build custom email flows via self-hosted Postal (STARTTLS on port 587):
+   - **Password reset:** custom API endpoint → HMAC-signed action token (with expiry) → branded email via Postal → callback endpoint verifies token → `supabase.auth.admin.updateUserById()` to set new password
+   - **Signup welcome:** fire-and-forget branded email after signup
+   - **Email verification** (for features like reminders): separate table with verification tokens — NOT for auth
+3. Use React Email templates with a shared BaseLayout (light theme — Outlook desktop fights dark backgrounds)
+4. HMAC-signed action tokens for stateless email verification
+
+Talk to Mark before implementing auth — he has working reference code in the Cortex project.
+
+## RLS policies across schemas
+
+Tables live in the project schema but `auth.uid()` comes from the `auth` schema. This just works for basic RLS policies because `SET search_path TO <schema>, public;` includes `public` which has access to `auth.uid()`. But if you create RPC functions that need to access both project tables and auth, use `SECURITY DEFINER` with explicit `SET search_path = <schema>, extensions, public`.
+
+## Next.js 16 gotchas (if upgrading)
+
+- `middleware.ts` is renamed to `proxy.ts` (Edge Runtime)
+- `NextResponse.redirect()` inside Docker uses internal hostname (`0.0.0.0:3000`) — use `x-forwarded-host` and `x-forwarded-proto` headers from Kong/Coolify to construct the correct public URL
+- `useSearchParams()` now requires a `<Suspense>` boundary
