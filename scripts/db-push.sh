@@ -27,9 +27,16 @@ source .env.local
 
 PSQL_CMD="docker exec -i ${SUPABASE_DB_CONTAINER} psql -U ${SUPABASE_DB_USER} -d postgres -v ON_ERROR_STOP=1"
 
-# 1. Ensure the project schema exists.
+# 1. Ensure the project schema exists and Supabase roles can access it.
 echo "Ensuring schema '${DB_SCHEMA}' exists in postgres..."
-ssh "${SUPABASE_HOST}" "${PSQL_CMD} -c \"CREATE SCHEMA IF NOT EXISTS ${DB_SCHEMA};\"" >/dev/null
+ssh "${SUPABASE_HOST}" "${PSQL_CMD}" <<EOSQL >/dev/null
+CREATE SCHEMA IF NOT EXISTS ${DB_SCHEMA};
+GRANT USAGE ON SCHEMA ${DB_SCHEMA} TO anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA ${DB_SCHEMA} TO anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA ${DB_SCHEMA} TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA ${DB_SCHEMA} GRANT ALL ON TABLES TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA ${DB_SCHEMA} GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
+EOSQL
 
 # 2. Ensure migration tracking table exists in the project schema.
 echo "Ensuring ${DB_SCHEMA}._cws_migrations table exists..."
