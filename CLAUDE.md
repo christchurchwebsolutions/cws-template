@@ -41,25 +41,39 @@ Default sequence:
 
 This way the deployed code never hits a database that doesn't yet have its tables.
 
-## Auth — DO NOT use GoTrue emails
+## Auth — use custom per-site auth, NOT Supabase Auth
 
-**This is a hard-won lesson from another CWS project.** If this project needs user authentication with email flows (signup confirmation, password reset, email verification):
+**Hard-won lesson — do NOT use shared Supabase Auth for end users.**
 
-**DO NOT rely on Supabase GoTrue's built-in email templates.** They are broken on self-hosted:
-- Templates don't reliably load
-- Confirmation links point at Studio URL instead of the app
-- Templates are server-wide (can't brand per-project on shared Supabase)
+The self-hosted Supabase instance's `auth.users` table is **shared cluster-wide** across every CWS project. Using it for a customer-facing site means:
+- A password change on one site affects every other site the user is on
+- Email collisions between projects (a new signup fails if the email is used elsewhere)
+- GoTrue's built-in email templates don't work on self-hosted (templates don't load, confirmation links point at Studio, can't brand per-project)
 
-**Instead, use this pattern:**
-1. Set `AUTOCONFIRM=true` on GoTrue — signups are instant, no email confirmation step
-2. Build custom email flows via self-hosted Postal (STARTTLS on port 587):
-   - **Password reset:** custom API endpoint → HMAC-signed action token (with expiry) → branded email via Postal → callback endpoint verifies token → `supabase.auth.admin.updateUserById()` to set new password
-   - **Signup welcome:** fire-and-forget branded email after signup
-   - **Email verification** (for features like reminders): separate table with verification tokens — NOT for auth
-3. Use React Email templates with a shared BaseLayout (light theme — Outlook desktop fights dark backgrounds)
-4. HMAC-signed action tokens for stateless email verification
+**Use custom per-site bcrypt + JWT cookies instead.** Reference implementation: `github.com/christchurchwebsolutions/naughty-nights-out` (public repo). Read:
 
-Talk to Mark before implementing auth — he has working reference code in the Cortex project.
+- `supabase/migrations/20260414164809_switch_users_to_custom_auth_with_rls.sql` — schema (add `passwordHash` + `authUid`, enable RLS)
+- `server/_core/auth.ts` — bcrypt, session JWT, PostgREST JWT for RLS
+- `server/_core/supabase.ts` — `sbAdmin()` bypasses RLS; `sbAsUser(user)` applies RLS
+- `server/_core/context.ts` — reads the session cookie, loads the user
+- `server/routers.ts` → `auth` router — `signUp` / `signIn` / `signOut` tRPC mutations
+- `client/src/pages/Login.tsx` — sign-in / sign-up form
+
+Architecture summary:
+- **Passwords:** bcrypt cost 12
+- **Session:** httpOnly cookie carrying a JWT signed with `JWT_SECRET` (same secret PostgREST validates against)
+- **RLS defense-in-depth:** policies key on `auth.uid() = users.authUid`. When you want RLS to apply, use `sbAsUser(ctx.user)` (generates a short-lived PostgREST JWT with sub=authUid). `sbAdmin()` uses the service_role key and bypasses RLS.
+
+### Password reset / welcome emails
+
+Use self-hosted Postal + HMAC-signed action tokens (not GoTrue emails — they're broken on self-hosted). Patterns to be filled in when Postal is deployed on the cluster.
+
+### Required env vars when you add auth
+
+- `JWT_SECRET` — **must match the supabase server's `JWT_SECRET`** so PostgREST validates our JWTs
+- `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+
+Ask Mark for the values via password manager.
 
 ## RLS policies across schemas
 
