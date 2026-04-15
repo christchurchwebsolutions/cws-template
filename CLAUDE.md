@@ -19,7 +19,7 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 ## Default behaviours
 
 - **Use the Supabase client from `src/lib/supabase.ts`** — don't create new clients inline.
-- **Use the auth helpers from `src/lib/auth.ts`** for sign in/up/out.
+- **Auth is intentionally NOT scaffolded.** When you need auth, follow the custom per-site pattern documented below under "Auth". Do not add Supabase Auth helpers.
 - **For new pages**, use the App Router (`src/app/<route>/page.tsx`). Server Components by default; only mark `'use client'` when you need interactivity.
 - **Tailwind 4** uses CSS-import config — no `tailwind.config.js`. Theme tokens go in `src/app/globals.css`.
 - **Don't add a `pages/` directory.** App Router only.
