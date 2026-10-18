@@ -9,7 +9,7 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 - **Stack:** Next.js 15 (App Router, TypeScript, Tailwind 4) + self-hosted Supabase + Coolify auto-deploy via Dockerfile
 - **Infra reference:** `/home/mark_harris/react/CWS-INFRASTRUCTURE.md` (read it if you need URLs, IPs, SSH commands, or to understand how deploys work)
 - **Schema = code:** all DB changes go through `supabase/migrations/`. See `AGENTS.md` for the exact loop.
-- **Per-project schema:** each project gets its own Postgres schema (e.g. `cortex`) within the shared `postgres` database. This gives us Supabase Studio visibility, `auth.uid()` for RLS, and access to realtime/storage. The schema name is in `DB_SCHEMA` in `.env.local`. Migrations auto-set `search_path` to the project schema.
+- **Per-project schema:** each project gets its own Postgres schema (e.g. `cortex`) within the shared `postgres` database. This gives us Supabase Studio visibility, `auth.uid()` for RLS, and access to realtime/storage. The schema name is in `DB_SCHEMA` (used by the db scripts) and `NEXT_PUBLIC_DB_SCHEMA` (used by both Supabase clients via `src/lib/db-schema.ts`) in `.env.local` and Coolify (set `NEXT_PUBLIC_DB_SCHEMA` as a build-time variable, like the other `NEXT_PUBLIC_` keys, because Next.js inlines it at build). **The two must match.** Without `NEXT_PUBLIC_DB_SCHEMA` the clients throw at startup rather than silently querying `public`. Migrations auto-set `search_path` to the project schema.
 - **Typed everywhere:** the Supabase client in `src/lib/supabase.ts` is typed via the generated `src/lib/database.types.ts`. Regenerate types after every migration with `./scripts/db-types.sh`.
 
 ## Skills available
@@ -18,19 +18,19 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 
 ## Default behaviours
 
-- **Use the Supabase client from `src/lib/supabase.ts`** — don't create new clients inline.
+- **Two Supabase clients, don't create new ones inline.** Browser and anon reads use `src/lib/supabase.ts` (anon key). Server writes use `supabaseAdmin()` from `src/lib/supabase-admin.ts` (service-role key, `import 'server-only'`, bypasses RLS) in Route Handlers, Server Actions and Server Components, after your own auth checks. Never import `supabase-admin.ts` from a `'use client'` file.
 - **Auth is intentionally NOT scaffolded.** When you need auth, follow the custom per-site pattern documented below under "Auth". Do not add Supabase Auth helpers.
 - **For new pages**, use the App Router (`src/app/<route>/page.tsx`). Server Components by default; only mark `'use client'` when you need interactivity.
 - **Tailwind 4** uses CSS-import config — no `tailwind.config.js`. Theme tokens go in `src/app/globals.css`.
 - **Don't add a `pages/` directory.** App Router only.
 - **Don't edit `database.types.ts` by hand** — always regenerate via `./scripts/db-types.sh`.
-- **Don't commit `.env.local`** — it's gitignored and contains the Postgres password.
+- **Don't commit `.env.local`** — it's gitignored and contains the Postgres password and the service-role key. `.env.example` is tracked and lists every key: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_DB_SCHEMA` (browser), `SUPABASE_SERVICE_ROLE_KEY` (server only, never `NEXT_PUBLIC_`), `DB_SCHEMA` (must equal `NEXT_PUBLIC_DB_SCHEMA`), `POSTGRES_PASSWORD` (db scripts only).
 - **Don't remove or break the `Dockerfile` or `.dockerignore`** — Coolify uses the Dockerfile to build and deploy this app. `next.config.ts` must keep `output: "standalone"` for the Dockerfile to work. If you add new public assets or change the build, verify the Dockerfile still copies everything needed.
 
 ## When the user describes a feature that needs data
 
 Default sequence:
-1. Design the tables, columns, constraints, indexes, and RLS policies
+1. Design the tables, columns, constraints, indexes, RLS policies and browser grants (see "Browsers read, the server writes" below)
 2. Create a migration: `./scripts/db-new-migration.sh "describe the change"`
 3. Write the SQL in the new migration file. The template already includes `SET search_path TO <schema>, public;` — your `CREATE TABLE`, `ALTER TABLE`, etc. land in the project schema automatically. For RLS policies, you can reference `auth.uid()` since we're in the shared `postgres` database with Supabase auth.
 4. Apply: `./scripts/db-push.sh`
@@ -40,6 +40,60 @@ Default sequence:
 8. Push to GitHub — Coolify auto-deploys
 
 This way the deployed code never hits a database that doesn't yet have its tables.
+
+## Browsers read, the server writes (security rule)
+
+Every CWS project shares one Supabase, one PostgREST and one JWT secret, so a logged-in token from ANY other CWS app (and the public anon key) is accepted against this project's schema too. A token with no `role` claim, such as a custom session cookie replayed as a Bearer token, runs as `anon` with `auth.uid()` set to its `sub`. Therefore:
+
+- **Every new table:** `ALTER TABLE … ENABLE ROW LEVEL SECURITY;` in the same migration. No exceptions, including lookup tables.
+- **Browser reads:** grant them explicitly, table by table, in the migration (`GRANT SELECT ON <schema>.<table> TO anon, authenticated;`), plus a `FOR SELECT` policy that shows only public rows. Use column-level `GRANT SELECT (col, …)` when a table has private columns. `db-push.sh` grants browsers nothing.
+- **Writes:** only through the server with a service-role client (`SUPABASE_SERVICE_ROLE_KEY`, server-only code, never `NEXT_PUBLIC_`). Never add an INSERT/UPDATE/DELETE/ALL policy for `anon`, `authenticated` or `public`, and never `USING (true)` for anything but public reads.
+- **Per-user policies** must key on this app's own users table (`auth.uid() = users.authUid`), never on the role alone (`TO authenticated USING (true)` is open to every CWS app's users).
+- **Functions:** `SECURITY DEFINER` functions are `service_role` only (`REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated; GRANT EXECUTE … TO service_role;`) unless the browser genuinely calls them and they're safe for any caller. Never let a browser-callable function take a user id as a parameter.
+- **Views:** a view owned by `supabase_admin` runs with the owner's rights and bypasses RLS. Create every view `WITH (security_invoker = true)` (or `ALTER VIEW … SET (security_invoker = true)`), and grant it to browsers like a table.
+- **`db-push.sh` fails loudly** if any table is left without RLS, a browser role holds a write grant, a browser policy allows writes, or a browser SELECT policy has no matching `GRANT SELECT` (reads broken).
+
+### Existing projects adopting the new `db-push.sh`
+
+The old script ran `GRANT ALL … TO anon, authenticated` on every push, so those grants are still there and the new script's check fails on the first push. Add a one-off migration before you push, listing the tables the browser really reads (check the code first: anything the browser writes must move behind a server route using `supabaseAdmin()`):
+
+```sql
+SET search_path TO <schema>, public;
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+-- RLS on for every table, including the migration ledger.
+DO $$
+DECLARE t text;
+BEGIN
+  FOR t IN SELECT c.relname FROM pg_class c
+           WHERE c.relnamespace = '<schema>'::regnamespace AND c.relkind IN ('r','p') AND NOT c.relrowsecurity
+  LOOP
+    EXECUTE format('ALTER TABLE <schema>.%I ENABLE ROW LEVEL SECURITY', t);
+  END LOOP;
+END $$;
+
+-- Revoke everything the old script granted, then give back only the reads.
+REVOKE ALL ON ALL TABLES    IN SCHEMA <schema> FROM anon, authenticated;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA <schema> FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA <schema> REVOKE ALL ON TABLES    FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA <schema> REVOKE ALL ON SEQUENCES FROM anon, authenticated;
+GRANT ALL ON ALL TABLES    IN SCHEMA <schema> TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA <schema> TO service_role;
+
+GRANT SELECT ON <schema>.posts, <schema>.categories TO anon, authenticated;  -- only what the browser reads
+
+-- Drop any browser write policy (INSERT/UPDATE/DELETE/ALL TO public, anon or authenticated)
+-- and any role-only read policy (TO authenticated USING (true)) on private tables.
+-- Also drop every SELECT policy on a table you did NOT grant back above, or db-push
+-- step 6 ("READS BROKEN") fails: a browser policy with no grant means a broken read.
+-- DROP POLICY IF EXISTS <name> ON <schema>.<table>;
+
+COMMIT;
+```
+
+Worked examples: `stopaids-site` `20261018125836_*.sql`, `naughty-nights-out` `20261018134026_*.sql`.
 
 ## Auth — use custom per-site auth, NOT Supabase Auth
 
@@ -71,7 +125,7 @@ Use self-hosted Postal + HMAC-signed action tokens (not GoTrue emails — they'r
 ### Required env vars when you add auth
 
 - `JWT_SECRET` — **must match the supabase server's `JWT_SECRET`** so PostgREST validates our JWTs
-- `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (the last is already in `.env.example` for writes)
 
 Ask Mark for the values via password manager.
 
