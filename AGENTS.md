@@ -12,7 +12,7 @@ Full infra reference: `/home/mark_harris/react/CWS-INFRASTRUCTURE.md`.
 
 ## Database changes — ALWAYS use migrations
 
-**Never** make schema changes in the Supabase Studio UI. Schema lives in git, in `supabase/migrations/`. Each project uses its own **Postgres schema** (e.g. `cortex`) within the shared `postgres` database. The schema name is set via `DB_SCHEMA` in `.env.local`. The flow:
+**Never** make schema changes in the Supabase Studio UI. Schema lives in git, in `supabase/migrations/`. Each project uses its own **Postgres schema** (e.g. `cortex`) within the shared `postgres` database. The schema name is set via `DB_SCHEMA` in `.env.local`, and `NEXT_PUBLIC_DB_SCHEMA` (read by both Supabase clients) must have the same value. The flow:
 
 1. **Create a migration file**:
    ```bash

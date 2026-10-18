@@ -1,6 +1,7 @@
 import 'server-only'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { Database } from './database.types'
+import { dbSchema } from './db-schema'
 
 /**
  * Server-only Supabase client with the service-role key. It bypasses RLS,
@@ -21,6 +22,7 @@ export function supabaseAdmin(): SupabaseClient<Database> {
   }
   admin = createClient<Database>(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
+    db: { schema: dbSchema() },
   })
   return admin
 }

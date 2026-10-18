@@ -9,7 +9,7 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 - **Stack:** Next.js 15 (App Router, TypeScript, Tailwind 4) + self-hosted Supabase + Coolify auto-deploy via Dockerfile
 - **Infra reference:** `/home/mark_harris/react/CWS-INFRASTRUCTURE.md` (read it if you need URLs, IPs, SSH commands, or to understand how deploys work)
 - **Schema = code:** all DB changes go through `supabase/migrations/`. See `AGENTS.md` for the exact loop.
-- **Per-project schema:** each project gets its own Postgres schema (e.g. `cortex`) within the shared `postgres` database. This gives us Supabase Studio visibility, `auth.uid()` for RLS, and access to realtime/storage. The schema name is in `DB_SCHEMA` in `.env.local`. Migrations auto-set `search_path` to the project schema.
+- **Per-project schema:** each project gets its own Postgres schema (e.g. `cortex`) within the shared `postgres` database. This gives us Supabase Studio visibility, `auth.uid()` for RLS, and access to realtime/storage. The schema name is in `DB_SCHEMA` (used by the db scripts) and `NEXT_PUBLIC_DB_SCHEMA` (used by both Supabase clients via `src/lib/db-schema.ts`) in `.env.local` and Coolify (set `NEXT_PUBLIC_DB_SCHEMA` as a build-time variable, like the other `NEXT_PUBLIC_` keys, because Next.js inlines it at build). **The two must match.** Without `NEXT_PUBLIC_DB_SCHEMA` the clients throw at startup rather than silently querying `public`. Migrations auto-set `search_path` to the project schema.
 - **Typed everywhere:** the Supabase client in `src/lib/supabase.ts` is typed via the generated `src/lib/database.types.ts`. Regenerate types after every migration with `./scripts/db-types.sh`.
 
 ## Skills available
@@ -24,7 +24,7 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 - **Tailwind 4** uses CSS-import config — no `tailwind.config.js`. Theme tokens go in `src/app/globals.css`.
 - **Don't add a `pages/` directory.** App Router only.
 - **Don't edit `database.types.ts` by hand** — always regenerate via `./scripts/db-types.sh`.
-- **Don't commit `.env.local`** — it's gitignored and contains the Postgres password and the service-role key. `.env.example` is tracked and lists every key: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (browser), `SUPABASE_SERVICE_ROLE_KEY` (server only, never `NEXT_PUBLIC_`), `DB_SCHEMA`, `POSTGRES_PASSWORD` (db scripts only).
+- **Don't commit `.env.local`** — it's gitignored and contains the Postgres password and the service-role key. `.env.example` is tracked and lists every key: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_DB_SCHEMA` (browser), `SUPABASE_SERVICE_ROLE_KEY` (server only, never `NEXT_PUBLIC_`), `DB_SCHEMA` (must equal `NEXT_PUBLIC_DB_SCHEMA`), `POSTGRES_PASSWORD` (db scripts only).
 - **Don't remove or break the `Dockerfile` or `.dockerignore`** — Coolify uses the Dockerfile to build and deploy this app. `next.config.ts` must keep `output: "standalone"` for the Dockerfile to work. If you add new public assets or change the build, verify the Dockerfile still copies everything needed.
 
 ## When the user describes a feature that needs data
@@ -86,6 +86,8 @@ GRANT SELECT ON <schema>.posts, <schema>.categories TO anon, authenticated;  -- 
 
 -- Drop any browser write policy (INSERT/UPDATE/DELETE/ALL TO public, anon or authenticated)
 -- and any role-only read policy (TO authenticated USING (true)) on private tables.
+-- Also drop every SELECT policy on a table you did NOT grant back above, or db-push
+-- step 6 ("READS BROKEN") fails: a browser policy with no grant means a broken read.
 -- DROP POLICY IF EXISTS <name> ON <schema>.<table>;
 
 COMMIT;
