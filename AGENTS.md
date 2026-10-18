@@ -49,7 +49,7 @@ No automatic rollback. If a migration is wrong, write a new "fix" migration that
 
 ## Repo conventions
 
-- Supabase client: `src/lib/supabase.ts` — use everywhere instead of creating new clients.
+- Supabase clients: `src/lib/supabase.ts` (anon key) for browser/anon reads; `src/lib/supabase-admin.ts` (`supabaseAdmin()`, service-role key, server-only) for every write. Don't create new clients inline.
 - Auth is intentionally not scaffolded: follow the custom per-site auth pattern in `CLAUDE.md` (not Supabase Auth).
 - App Router only — don't add a `pages/` directory.
 - Env vars: copy `.env.example` → `.env.local` for local dev. `.env.local` is gitignored.
@@ -57,7 +57,7 @@ No automatic rollback. If a migration is wrong, write a new "fix" migration that
 ## Connection patterns
 
 - **Browser code**: use `NEXT_PUBLIC_SUPABASE_URL` (the public HTTPS URL).
-- **Server code**: the anon client is fine for reads; writes need a server-only service-role client (`SUPABASE_SERVICE_ROLE_KEY`, never exposed to the browser). For raw private-network access from a Coolify-deployed app, Kong is at `http://10.0.1.2:8000`.
+- **Server code**: the anon client is fine for reads; writes use `supabaseAdmin()` from `src/lib/supabase-admin.ts` (`SUPABASE_SERVICE_ROLE_KEY`, never exposed to the browser). For raw private-network access from a Coolify-deployed app, Kong is at `http://10.0.1.2:8000`.
 
 ## Don't
 

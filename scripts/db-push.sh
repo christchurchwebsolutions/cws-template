@@ -93,6 +93,31 @@ EOSQL
 if [ -n "${OPEN}" ]; then
   echo "SECURITY: tables open to browsers in '${DB_SCHEMA}': ${OPEN}" >&2
   echo "Fix with a migration: ALTER TABLE ... ENABLE ROW LEVEL SECURITY; REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ... FROM anon, authenticated; drop the write policy (the server writes with service_role)." >&2
+  echo "First push after adopting this script? See CLAUDE.md, \"Existing projects adopting the new db-push.sh\"." >&2
+  exit 1
+fi
+
+# 6. Fail loudly if reads are broken: a browser SELECT policy with no
+#    matching grant. TO anon needs SELECT for anon, TO authenticated needs it
+#    for authenticated, TO public (no TO clause) needs it for at least one.
+#    New tables get no browser grants by default, so the migration that adds
+#    the policy must also GRANT SELECT.
+UNGRANTED=$(ssh "${SUPABASE_HOST}" "${PSQL_CMD} -At" <<EOSQL
+SELECT string_agg(DISTINCT c.relname || '.' || pol.polname, ', ')
+  FROM pg_policy pol
+  JOIN pg_class c ON c.oid = pol.polrelid
+ WHERE c.relnamespace = '${DB_SCHEMA}'::regnamespace
+   AND pol.polpermissive AND pol.polcmd IN ('r','*')
+   AND coalesce(pg_get_expr(pol.polqual, pol.polrelid), 'true') <> 'false'
+   AND (('anon'::regrole::oid = ANY (pol.polroles) AND NOT has_any_column_privilege('anon', c.oid, 'SELECT'))
+     OR ('authenticated'::regrole::oid = ANY (pol.polroles) AND NOT has_any_column_privilege('authenticated', c.oid, 'SELECT'))
+     OR (0::oid = ANY (pol.polroles) AND NOT has_any_column_privilege('anon', c.oid, 'SELECT')
+                                     AND NOT has_any_column_privilege('authenticated', c.oid, 'SELECT')));
+EOSQL
+)
+if [ -n "${UNGRANTED}" ]; then
+  echo "READS BROKEN: '${DB_SCHEMA}' browser SELECT policies with no matching SELECT grant: ${UNGRANTED}" >&2
+  echo "Fix with a migration: GRANT SELECT ON <table> TO anon, authenticated;  (or TO the role the policy names; drop the policy if browsers shouldn't read it)" >&2
   exit 1
 fi
 

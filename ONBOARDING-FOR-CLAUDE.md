@@ -204,7 +204,7 @@ Wait for Jo to acknowledge, then ask her to paste.
 
 When Jo pastes the contents:
 
-1. **Validate** it has the four expected keys: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `DB_NAME`, `POSTGRES_PASSWORD`. If any are missing, tell Jo *"This is missing the `<key>` line — please ask Mark to send the full file."*
+1. **Validate** it has the five expected keys: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `DB_SCHEMA`, `POSTGRES_PASSWORD`, and the server-only `SUPABASE_SERVICE_ROLE_KEY` (used by `src/lib/supabase-admin.ts` for every write). If any are missing, tell Jo *"This is missing the `<key>` line — please ask Mark to send the full file."*
 
 2. **Write it** to `~/<project-name>/.env.local` and chmod 600.
 
