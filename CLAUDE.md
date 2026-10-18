@@ -30,7 +30,7 @@ This is a CWS (Christchurch Web Solutions) project. Read `AGENTS.md` for the dat
 ## When the user describes a feature that needs data
 
 Default sequence:
-1. Design the tables, columns, constraints, indexes, and RLS policies
+1. Design the tables, columns, constraints, indexes, RLS policies and browser grants (see "Browsers read, the server writes" below)
 2. Create a migration: `./scripts/db-new-migration.sh "describe the change"`
 3. Write the SQL in the new migration file. The template already includes `SET search_path TO <schema>, public;` — your `CREATE TABLE`, `ALTER TABLE`, etc. land in the project schema automatically. For RLS policies, you can reference `auth.uid()` since we're in the shared `postgres` database with Supabase auth.
 4. Apply: `./scripts/db-push.sh`
@@ -40,6 +40,17 @@ Default sequence:
 8. Push to GitHub — Coolify auto-deploys
 
 This way the deployed code never hits a database that doesn't yet have its tables.
+
+## Browsers read, the server writes (security rule)
+
+Every CWS project shares one Supabase, one PostgREST and one JWT secret, so a logged-in token from ANY other CWS app (and the public anon key) is accepted against this project's schema too. A token with no `role` claim, such as a custom session cookie replayed as a Bearer token, runs as `anon` with `auth.uid()` set to its `sub`. Therefore:
+
+- **Every new table:** `ALTER TABLE … ENABLE ROW LEVEL SECURITY;` in the same migration. No exceptions, including lookup tables.
+- **Browser reads:** grant them explicitly, table by table, in the migration (`GRANT SELECT ON <schema>.<table> TO anon, authenticated;`), plus a `FOR SELECT` policy that shows only public rows. Use column-level `GRANT SELECT (col, …)` when a table has private columns. `db-push.sh` grants browsers nothing.
+- **Writes:** only through the server with a service-role client (`SUPABASE_SERVICE_ROLE_KEY`, server-only code, never `NEXT_PUBLIC_`). Never add an INSERT/UPDATE/DELETE/ALL policy for `anon`, `authenticated` or `public`, and never `USING (true)` for anything but public reads.
+- **Per-user policies** must key on this app's own users table (`auth.uid() = users.authUid`), never on the role alone (`TO authenticated USING (true)` is open to every CWS app's users).
+- **Functions:** `SECURITY DEFINER` functions are `service_role` only (`REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated; GRANT EXECUTE … TO service_role;`) unless the browser genuinely calls them and they're safe for any caller. Never let a browser-callable function take a user id as a parameter.
+- **`db-push.sh` fails loudly** if any table is left without RLS, a browser role holds a write grant, or a browser policy allows writes.
 
 ## Auth — use custom per-site auth, NOT Supabase Auth
 

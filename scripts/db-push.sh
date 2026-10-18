@@ -32,15 +32,25 @@ echo "Ensuring schema '${DB_SCHEMA}' exists in postgres..."
 ssh "${SUPABASE_HOST}" "${PSQL_CMD}" <<EOSQL >/dev/null
 CREATE SCHEMA IF NOT EXISTS ${DB_SCHEMA};
 GRANT USAGE ON SCHEMA ${DB_SCHEMA} TO anon, authenticated, service_role;
-GRANT ALL ON ALL TABLES IN SCHEMA ${DB_SCHEMA} TO anon, authenticated, service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA ${DB_SCHEMA} TO anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA ${DB_SCHEMA} GRANT ALL ON TABLES TO anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA ${DB_SCHEMA} GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
+-- Browsers read, the server writes. The server uses service_role (bypasses
+-- RLS). Browser roles (anon, authenticated) get NOTHING here: a migration
+-- that adds a browser-readable table grants the exact SELECT itself
+-- (GRANT SELECT ON <table> TO anon, authenticated) with an RLS policy.
+-- Never grant table privileges to browser roles in this script: it runs on
+-- every push and would undo column-level grants and revokes. Every CWS app
+-- shares one JWT secret, so an authenticated token from ANY other CWS app
+-- is accepted here too.
+GRANT ALL ON ALL TABLES IN SCHEMA ${DB_SCHEMA} TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA ${DB_SCHEMA} TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA ${DB_SCHEMA} REVOKE ALL ON TABLES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA ${DB_SCHEMA} REVOKE ALL ON SEQUENCES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA ${DB_SCHEMA} GRANT ALL ON TABLES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA ${DB_SCHEMA} GRANT ALL ON SEQUENCES TO service_role;
 EOSQL
 
 # 2. Ensure migration tracking table exists in the project schema.
 echo "Ensuring ${DB_SCHEMA}._cws_migrations table exists..."
-ssh "${SUPABASE_HOST}" "${PSQL_CMD} -c \"CREATE TABLE IF NOT EXISTS ${DB_SCHEMA}._cws_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());\"" >/dev/null
+ssh "${SUPABASE_HOST}" "${PSQL_CMD} -c \"CREATE TABLE IF NOT EXISTS ${DB_SCHEMA}._cws_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now()); ALTER TABLE ${DB_SCHEMA}._cws_migrations ENABLE ROW LEVEL SECURITY; REVOKE ALL ON ${DB_SCHEMA}._cws_migrations FROM anon, authenticated;\"" >/dev/null
 
 # 3. Get list of already-applied migrations.
 APPLIED=$(ssh "${SUPABASE_HOST}" "${PSQL_CMD} -At -c \"SELECT name FROM ${DB_SCHEMA}._cws_migrations ORDER BY name;\"")
@@ -59,5 +69,31 @@ for f in supabase/migrations/*.sql; do
   ssh "${SUPABASE_HOST}" "${PSQL_CMD} -c \"INSERT INTO ${DB_SCHEMA}._cws_migrations (name) VALUES ('$base');\"" >/dev/null
   APPLIED_COUNT=$((APPLIED_COUNT + 1))
 done
+
+# 5. Fail loudly if any table is left open to browsers: RLS off, a browser
+#    role holding a write grant, or a browser policy that allows writes.
+OPEN=$(ssh "${SUPABASE_HOST}" "${PSQL_CMD} -At" <<EOSQL
+SELECT string_agg(DISTINCT x, ', ') FROM (
+  SELECT c.relname || ' (no RLS)' AS x FROM pg_class c
+   WHERE c.relnamespace = '${DB_SCHEMA}'::regnamespace AND c.relkind IN ('r','p') AND NOT c.relrowsecurity
+  UNION ALL
+  SELECT c.relname || ' (' || r.role || ' write grant)' FROM pg_class c
+   CROSS JOIN (VALUES ('anon'), ('authenticated')) AS r(role)
+   WHERE c.relnamespace = '${DB_SCHEMA}'::regnamespace AND c.relkind IN ('r','p','v','m')
+     AND (has_table_privilege(r.role, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          OR has_any_column_privilege(r.role, c.oid, 'INSERT,UPDATE,REFERENCES'))
+  UNION ALL
+  SELECT tablename || '.' || policyname || ' (browser write policy)' FROM pg_policies
+   WHERE schemaname = '${DB_SCHEMA}' AND permissive = 'PERMISSIVE' AND cmd <> 'SELECT'
+     AND roles && ARRAY['public','anon','authenticated']::name[]
+     AND NOT (coalesce(qual,'false') = 'false' AND coalesce(with_check,'false') = 'false')
+) s;
+EOSQL
+)
+if [ -n "${OPEN}" ]; then
+  echo "SECURITY: tables open to browsers in '${DB_SCHEMA}': ${OPEN}" >&2
+  echo "Fix with a migration: ALTER TABLE ... ENABLE ROW LEVEL SECURITY; REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ... FROM anon, authenticated; drop the write policy (the server writes with service_role)." >&2
+  exit 1
+fi
 
 echo "Done. ${APPLIED_COUNT} new migration(s) applied to schema '${DB_SCHEMA}'."
