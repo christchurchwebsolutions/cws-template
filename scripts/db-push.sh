@@ -25,6 +25,12 @@ source .env.local
 : "${SUPABASE_DB_CONTAINER:=supabase-db}"
 : "${DB_SCHEMA:?Set DB_SCHEMA in .env.local (e.g. DB_SCHEMA=cortex)}"
 
+# SECURITY DEFINER functions that browser roles may run: RLS helpers the
+# policies call (they must stay executable for the roles the policies apply
+# to). Every other definer function must be service_role only; step 6 fails
+# the push if one is runnable by anon or authenticated.
+BROWSER_DEFINER_ALLOW=""
+
 PSQL_CMD="docker exec -i ${SUPABASE_DB_CONTAINER} psql -U ${SUPABASE_DB_USER} -d postgres -v ON_ERROR_STOP=1"
 
 # 1. Ensure the project schema exists and Supabase roles can access it.
@@ -97,7 +103,28 @@ if [ -n "${OPEN}" ]; then
   exit 1
 fi
 
-# 6. Fail loudly if reads are broken: a browser SELECT policy with no
+# 6. Fail loudly if a SECURITY DEFINER function is runnable by a browser
+#    role. Postgres gives every new function EXECUTE to PUBLIC and a
+#    per-schema default can't remove that, so each migration that adds one
+#    must REVOKE it (REVOKE ALL ON FUNCTION ... FROM PUBLIC, anon,
+#    authenticated; GRANT EXECUTE ... TO service_role). Trigger functions
+#    can't be called directly and are skipped.
+OPEN_FN=$(ssh "${SUPABASE_HOST}" "${PSQL_CMD} -At" <<EOSQL
+SELECT string_agg(p.oid::regprocedure::text, ', ') FROM pg_proc p
+ WHERE p.pronamespace = '${DB_SCHEMA}'::regnamespace AND p.prosecdef
+   AND p.prorettype <> 'trigger'::regtype
+   AND p.proname <> ALL (string_to_array('${BROWSER_DEFINER_ALLOW}', ' '))
+   AND (has_function_privilege('anon', p.oid, 'EXECUTE')
+        OR has_function_privilege('authenticated', p.oid, 'EXECUTE'));
+EOSQL
+)
+if [ -n "${OPEN_FN}" ]; then
+  echo "SECURITY: SECURITY DEFINER functions in '${DB_SCHEMA}' runnable by browser roles: ${OPEN_FN}" >&2
+  echo "Fix with a migration: REVOKE ALL ON FUNCTION ... FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION ... TO service_role;  (or add a genuine RLS helper to BROWSER_DEFINER_ALLOW in this script)" >&2
+  exit 1
+fi
+
+# 7. Fail loudly if reads are broken: a browser SELECT policy with no
 #    matching grant. TO anon needs SELECT for anon, TO authenticated needs it
 #    for authenticated, TO public (no TO clause) needs it for at least one.
 #    New tables get no browser grants by default, so the migration that adds

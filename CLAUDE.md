@@ -87,13 +87,15 @@ GRANT SELECT ON <schema>.posts, <schema>.categories TO anon, authenticated;  -- 
 -- Drop any browser write policy (INSERT/UPDATE/DELETE/ALL TO public, anon or authenticated)
 -- and any role-only read policy (TO authenticated USING (true)) on private tables.
 -- Also drop every SELECT policy on a table you did NOT grant back above, or db-push
--- step 6 ("READS BROKEN") fails: a browser policy with no grant means a broken read.
+-- step 7 ("READS BROKEN") fails: a browser policy with no grant means a broken read.
 -- DROP POLICY IF EXISTS <name> ON <schema>.<table>;
 
 COMMIT;
 ```
 
-Worked examples: `stopaids-site` `20261018125836_*.sql`, `naughty-nights-out` `20261018134026_*.sql`.
+Functions: Postgres lets PUBLIC run every new function, and a per-schema default can't change that. In the same migration, run `REVOKE ALL ON FUNCTION <schema>.<fn>(<args>) FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION <schema>.<fn>(<args>) TO service_role;` for each function. db-push step 6 fails if a SECURITY DEFINER function is still runnable by a browser role. The exception is an RLS helper that your browser SELECT policies call (for example `current_user_id()`): leave it runnable by `authenticated` and add its name to `BROWSER_DEFINER_ALLOW` at the top of `scripts/db-push.sh`.
+
+Worked examples: `stopaids-site` `20261018125836_*.sql`, `naughty-nights-out` `20261018134026_*.sql`, `hearth` `20261018190000_*.sql` (RLS helpers on the allow list).
 
 ## Auth — use custom per-site auth, NOT Supabase Auth
 
