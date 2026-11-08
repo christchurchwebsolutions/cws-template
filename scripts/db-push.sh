@@ -29,8 +29,8 @@ source .env.local
 # separated: RLS helpers the browser policies call and RPCs the browser or
 # sbAsUser() really calls. Each must be safe for a signed-in user of ANY CWS
 # app (never take a user id as a parameter). The migration that adds one
-# grants EXECUTE to the exact role itself; db-push leaves a listed function's
-# grants alone. A name covers every overload. Every other function is
+# revokes it from PUBLIC and grants EXECUTE to the exact role itself; db-push
+# leaves a listed function's grants alone (step 7 fails if PUBLIC keeps it). A name covers every overload. Every other function is
 # service_role only: step 5 takes away PUBLIC's default EXECUTE and step 7
 # fails the push if anon or authenticated can still run it.
 # (Was BROWSER_DEFINER_ALLOW, which covered SECURITY DEFINER functions only.)
@@ -76,12 +76,13 @@ BROWSER_FN_USES="
    WHERE d.refclassid = 'pg_proc'::regclass
      AND has_any_column_privilege(r.role, v.oid, 'SELECT')"
 # BROWSER_FN_USES, plus allow-listed functions, plus (repeatedly) any function
-# of ours whose name appears in the body of a SECURITY INVOKER one already in
-# the set: an invoker function runs the functions it calls as the browser,
-# and Postgres doesn't record calls made inside a body. Matching by name can
-# include too much, never too little; anything included that browsers can
-# run makes step 7 fail, so it is a loud failure, never a broken read.
-# Columns: fn, role, via.
+# of ours that a SECURITY INVOKER one already in the set calls: an invoker
+# function runs the functions it calls as the browser. SQL-standard bodies
+# (BEGIN ATOMIC, RETURN) record their calls in pg_depend; for $$ bodies
+# Postgres records nothing, so a function counts if its name appears in the
+# body. That can include too much, rarely too little (calls built with
+# EXECUTE are missed); anything included that browsers can run makes step 7
+# fail, so it is a loud failure, never a broken read. Columns: fn, role, via.
 BROWSER_FN_NEEDED="
   WITH RECURSIVE needed(fn, role, via) AS (
     SELECT u.fn, u.role, u.via FROM (${BROWSER_FN_USES}) u
@@ -94,7 +95,10 @@ BROWSER_FN_NEEDED="
       FROM needed n
       JOIN pg_proc caller ON caller.oid = n.fn AND NOT caller.prosecdef
       JOIN pg_proc callee ON callee.pronamespace = '${DB_SCHEMA}'::regnamespace AND callee.oid <> caller.oid
-                         AND caller.prosrc ~* ('\\m' || callee.proname || '\\M')
+                         AND (caller.prosrc ~* ('\\m' || regexp_replace(callee.proname, '([^[:alnum:]_])', '\\\\\\1', 'g') || '\\M')
+                              OR EXISTS (SELECT 1 FROM pg_depend d
+                                          WHERE d.classid = 'pg_proc'::regclass AND d.objid = caller.oid
+                                            AND d.refclassid = 'pg_proc'::regclass AND d.refobjid = callee.oid))
   )
   SELECT fn, role, via FROM needed"
 
@@ -104,9 +108,10 @@ BROWSER_FN_NEEDED="
 # every function, and take PUBLIC's EXECUTE away from each one that isn't on
 # BROWSER_FUNCTION_ALLOW. A function a browser read or a listed function
 # needs (BROWSER_FN_NEEDED) is left as it is, so this never breaks one; step 7
-# then fails the push until it's listed or revoked. Explicit grants to anon or authenticated are left
-# for step 7 too: they're someone's decision, so the push fails rather than
-# silently undoing them.
+# then fails the push until it's listed or revoked. Explicit grants to anon
+# or authenticated are left for step 7 too: they're someone's decision, so
+# the push fails rather than silently undoing them. Each revoke is printed
+# (a NOTICE), so a browser .rpc() that relied on the default shows up here.
 lock_down_functions() {
   ssh "${SUPABASE_HOST}" "${PSQL_CMD}" <<EOSQL >/dev/null
 DO \$lock\$
@@ -128,6 +133,7 @@ BEGIN
                     WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')
   LOOP
     EXECUTE format('REVOKE EXECUTE ON ROUTINE %s FROM PUBLIC', f);
+    RAISE NOTICE 'db-push: revoked PUBLIC EXECUTE on %', f;
   END LOOP;
 END
 \$lock\$;
@@ -179,7 +185,13 @@ for f in supabase/migrations/*.sql; do
     continue
   fi
   echo "  + applying:         $base"
-  ssh "${SUPABASE_HOST}" "${PSQL_CMD}" < "$f"
+  if ! ssh "${SUPABASE_HOST}" "${PSQL_CMD}" < "$f"; then
+    # Whatever the failed migration did commit (functions included) still
+    # gets locked down before we stop.
+    echo "Migration ${base} failed; locking down functions before stopping." >&2
+    lock_down_functions || true
+    exit 1
+  fi
   ssh "${SUPABASE_HOST}" "${PSQL_CMD} -c \"INSERT INTO ${DB_SCHEMA}._cws_migrations (name) VALUES ('$base');\"" >/dev/null
   lock_down_functions
   APPLIED_COUNT=$((APPLIED_COUNT + 1))
@@ -238,13 +250,30 @@ SELECT string_agg(x, '; ' ORDER BY x) FROM (
     FROM pg_proc p
    WHERE ${FN_OURS} AND p.prosecdef
      AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) cfg WHERE cfg LIKE 'search_path=%')
+  UNION ALL
+  SELECT p.oid::regprocedure::text || ' (on BROWSER_FUNCTION_ALLOW but still granted to PUBLIC: REVOKE ... FROM PUBLIC and GRANT EXECUTE to the exact roles)'
+    FROM pg_proc p
+   WHERE ${FN_OURS} AND ${FN_CALLABLE} AND NOT (${FN_NOT_ALLOWED})
+     AND EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                  WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')
+  UNION ALL
+  -- An extension installed into the project schema (CREATE EXTENSION with
+  -- this schema first on search_path) puts its functions on /rpc too.
+  SELECT 'extension ' || e.extname || ' (installed in ${DB_SCHEMA}, so browsers can call its functions: ALTER EXTENSION ' || e.extname || ' SET SCHEMA extensions)'
+    FROM pg_extension e
+   WHERE e.extnamespace = '${DB_SCHEMA}'::regnamespace
+     AND EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc p ON p.oid = d.objid
+                  WHERE d.classid = 'pg_proc'::regclass AND d.refclassid = 'pg_extension'::regclass
+                    AND d.refobjid = e.oid AND d.deptype = 'e'
+                    AND (has_function_privilege('anon', p.oid, 'EXECUTE')
+                         OR has_function_privilege('authenticated', p.oid, 'EXECUTE')))
 ) s;
 EOSQL
 )
 if [ -n "${OPEN_FN}" ]; then
   echo "SECURITY: functions open in '${DB_SCHEMA}': ${OPEN_FN}" >&2
-  echo "Fix with a migration: REVOKE ALL ON FUNCTION ... FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION ... TO service_role;  and give every SECURITY DEFINER function SET search_path = ${DB_SCHEMA}, pg_temp (ALTER FUNCTION ... SET search_path = ...)." >&2
-  echo "Only if the browser really calls it (an RLS helper a browser policy uses, or an RPC that acts only as auth.uid()): add its name to BROWSER_FUNCTION_ALLOW in scripts/db-push.sh and GRANT EXECUTE to just the role that needs it." >&2
+  echo "Fix with a migration: REVOKE ALL ON FUNCTION ... FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION ... TO service_role;  and give every SECURITY DEFINER function SET search_path = ${DB_SCHEMA}, pg_temp (ALTER FUNCTION ... SET search_path = ...). Install extensions WITH SCHEMA extensions." >&2
+  echo "Only if the browser really calls it (an RLS helper a browser policy uses, or an RPC that acts only as auth.uid()): add its name to BROWSER_FUNCTION_ALLOW in scripts/db-push.sh, REVOKE it FROM PUBLIC and GRANT EXECUTE to just the role that needs it." >&2
   exit 1
 fi
 

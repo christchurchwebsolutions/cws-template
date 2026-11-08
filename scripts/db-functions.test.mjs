@@ -10,6 +10,9 @@
 //     public that isn't on BROWSER_FUNCTION_ALLOW in scripts/db-push.sh;
 //   * a migration grants EXECUTE on ALL functions in a schema, or a default
 //     privilege on functions, to a browser role;
+//   * an allow-listed function keeps PUBLIC's default EXECUTE (so anon can
+//     run it), instead of a grant to the exact role;
+//   * CREATE EXTENSION without a schema (it lands in the project schema);
 //   * a SECURITY DEFINER function, as the migrations leave it, has no
 //     SET search_path;
 //   * a name on BROWSER_FUNCTION_ALLOW matches no function the migrations
@@ -111,6 +114,7 @@ const toBrowser = (roles) => splitTop(roles.replace(/\bwith\s+grant\s+option\b.*
   .filter((r) => BROWSER_ROLES.has(r));
 
 const EXEC = /\b(execute|all)\b/i;
+const FIXED_SCHEMA_EXTENSIONS = new Set(["pg_cron", "pg_net", "pgsodium", "supabase_vault", "pg_graphql", "plpgsql"]);
 // A grant or revoke on functions inside a dollar-quoted block (DO loops, EXECUTE format).
 // [^;'] keeps each match inside one quoted statement.
 const DYN_GRANT = /\bgrant\b[^;']*?\bon\s+(all\s+)?(function|procedure|routine)s?\b[^;']*?\bto\b[^;']*?\b(anon|authenticated|public)\b/i;
@@ -139,6 +143,7 @@ export function checkMigrations(migrations, allow) {
   const fns = new Map(); // name -> { definer, hasPath, file }
   const grants = new Map(); // name -> Map(browser role -> file that granted it)
   const defaults = new Map(); // browser role -> file of ALTER DEFAULT PRIVILEGES ... GRANT ... ON FUNCTIONS
+  const looseExtensions = new Map(); // extension created with no schema -> file
 
   const grant = (name, roles, file) => {
     const g = grants.get(name) ?? new Map();
@@ -162,7 +167,21 @@ export function checkMigrations(migrations, allow) {
         if (rv) revoke(loopTargets(body, [...grants.keys()]), toBrowser(rv[3]));
       }
       let m;
+      // With no SCHEMA, an extension lands in the first schema on search_path: the project
+      // schema, which puts its functions on /rpc. (These few always pick their own schema.)
+      if ((m = st.match(/^create\s+extension\s+(?:if\s+not\s+exists\s+)?("[^"]+"|\S+)(.*)$/i))) {
+        const ext = ident(m[1]);
+        if (!/\bschema\s+/i.test(m[2]) && !FIXED_SCHEMA_EXTENSIONS.has(ext)) looseExtensions.set(ext, file);
+        continue;
+      }
+      if ((m = st.match(/^(?:alter\s+extension\s+("[^"]+"|\S+)\s+set\s+schema\b|drop\s+extension\s+(?:if\s+exists\s+)?(.*?)(?:\s+(?:cascade|restrict))?$)/i))) {
+        for (const e of m[1] ? [m[1]] : splitTop(m[2])) looseExtensions.delete(ident(e));
+        continue;
+      }
       if ((m = st.match(/^create\s+(?:or\s+replace\s+)?(function|procedure)\s+((?:"(?:[^"]|"")*"|[\w$])+(?:\s*\.\s*(?:"(?:[^"]|"")*"|[\w$]+))?)\s*\(/i))) {
+        // A new function starts with PUBLIC's default EXECUTE (db-push revokes it unless
+        // the function is allow-listed; then the migration must).
+        if (!fns.has(ident(m[2]))) grant(ident(m[2]), ["public"], `${file}#default`);
         fns.set(ident(m[2]), {
           definer: /\bsecurity\s+definer\b/i.test(st),
           hasPath: /\bset\s+search_path\b/i.test(st),
@@ -219,10 +238,17 @@ export function checkMigrations(migrations, allow) {
   }
 
   for (const [name, g] of grants) {
-    if (allowed.has(name)) continue;
-    for (const [role, file] of g) {
-      problems.push(`${file}: grants EXECUTE on ${name} to ${role}, but ${name} isn't on BROWSER_FUNCTION_ALLOW in scripts/db-push.sh`);
+    for (const [role, where] of g) {
+      const isDefault = where.endsWith("#default"), file = where.replace(/#default$/, "");
+      if (allowed.has(name)) {
+        if (role === "public") problems.push(`${file}: ${name} is on BROWSER_FUNCTION_ALLOW but PUBLIC can still run it; REVOKE ALL ON FUNCTION ... FROM PUBLIC and GRANT EXECUTE to the exact role`);
+      } else if (!isDefault) {
+        problems.push(`${file}: grants EXECUTE on ${name} to ${role}, but ${name} isn't on BROWSER_FUNCTION_ALLOW in scripts/db-push.sh`);
+      }
     }
+  }
+  for (const [ext, file] of looseExtensions) {
+    problems.push(`${file}: CREATE EXTENSION ${ext} without WITH SCHEMA extensions can install it into the project schema; add a migration with ALTER EXTENSION ${ext} SET SCHEMA extensions`);
   }
   for (const [role, file] of defaults) {
     problems.push(`${file}: ALTER DEFAULT PRIVILEGES grants EXECUTE on new functions to ${role}`);
@@ -265,7 +291,10 @@ test("guard: passes the safe patterns", () => {
       LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
       AS $fn$ SELECT true -- GRANT EXECUTE ON FUNCTION x TO anon in a comment is fine
       $fn$;
+    REVOKE ALL ON FUNCTION is_member(uuid) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION is_member(uuid) TO authenticated;
+    CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
+    CREATE EXTENSION IF NOT EXISTS pg_cron;
     CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
     GRANT USAGE ON SCHEMA app TO anon, authenticated;
     GRANT SELECT ON app.posts TO anon, authenticated;
@@ -347,7 +376,25 @@ test("guard: a dynamic browser grant it can't read fails", () => {
 
 test("guard: a stale allow-list entry fails", () => {
   assert.equal(run(`SELECT 1;`, ["gone"]).length, 1);
-  assert.deepEqual(run(`CREATE FUNCTION app.kept() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;`, ["kept"]), []);
+  assert.deepEqual(run(`CREATE FUNCTION app.kept() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
+    REVOKE EXECUTE ON FUNCTION app.kept() FROM PUBLIC;`, ["kept"]), []);
+});
+
+test("guard: an allow-listed function must not keep PUBLIC's default", () => {
+  const p = run(`CREATE FUNCTION app.rpc() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
+    GRANT EXECUTE ON FUNCTION app.rpc() TO authenticated;`, ["rpc"]);
+  assert.equal(p.length, 1);
+  assert.match(p[0], /PUBLIC can still run it/);
+  // Not listed: db-push revokes the default itself, so only the explicit grant counts.
+  assert.equal(run(`CREATE FUNCTION app.rpc() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;`).length, 0);
+});
+
+test("guard: an extension installed without a schema fails", () => {
+  assert.equal(run(`CREATE EXTENSION IF NOT EXISTS citext;`).length, 1);
+  assert.equal(run(`CREATE EXTENSION "http";`).length, 1);
+  assert.deepEqual(run(`CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions;`), []);
+  assert.deepEqual(run(`CREATE EXTENSION IF NOT EXISTS citext; ALTER EXTENSION citext SET SCHEMA extensions;`), []);
+  assert.deepEqual(run(`CREATE EXTENSION http; DROP EXTENSION IF EXISTS http CASCADE;`), []);
 });
 
 test("guard: reads the allow-list line from db-push.sh", () => {
