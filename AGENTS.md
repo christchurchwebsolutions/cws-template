@@ -66,5 +66,5 @@ No automatic rollback. If a migration is wrong, write a new "fix" migration that
 - Don't edit `src/lib/database.types.ts` by hand — always regenerate.
 - Don't create a table without RLS, grant INSERT/UPDATE/DELETE to `anon`/`authenticated`, or write a policy that lets them write. Writes go through the server with the service-role key.
 - Don't key a policy on the role alone (`TO authenticated USING (true)`): any CWS app's users would match. Key per-user policies on this app's own users table.
-- Don't leave `SECURITY DEFINER` functions executable by `anon`/`authenticated` unless the browser really calls them and they're safe for any caller.
+- Don't let `anon`/`authenticated` run a function unless the browser really calls it, it's safe for any CWS app's user, and it's on `BROWSER_FUNCTION_ALLOW` in `scripts/db-push.sh` with a grant to the exact role (not PUBLIC). db-push removes PUBLIC's default EXECUTE from the others and fails if a browser role can still run one, a `SECURITY DEFINER` function has no `SET search_path`, or an extension sits in the project schema.
 
