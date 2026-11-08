@@ -49,9 +49,9 @@ Every CWS project shares one Supabase, one PostgREST and one JWT secret, so a lo
 - **Browser reads:** grant them explicitly, table by table, in the migration (`GRANT SELECT ON <schema>.<table> TO anon, authenticated;`), plus a `FOR SELECT` policy that shows only public rows. Use column-level `GRANT SELECT (col, …)` when a table has private columns. `db-push.sh` grants browsers nothing.
 - **Writes:** only through the server with a service-role client (`SUPABASE_SERVICE_ROLE_KEY`, server-only code, never `NEXT_PUBLIC_`). Never add an INSERT/UPDATE/DELETE/ALL policy for `anon`, `authenticated` or `public`, and never `USING (true)` for anything but public reads.
 - **Per-user policies** must key on this app's own users table (`auth.uid() = users.authUid`), never on the role alone (`TO authenticated USING (true)` is open to every CWS app's users).
-- **Functions:** `SECURITY DEFINER` functions are `service_role` only (`REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated; GRANT EXECUTE … TO service_role;`) unless the browser genuinely calls them and they're safe for any caller. Never let a browser-callable function take a user id as a parameter.
+- **Functions:** every function is `service_role` only: after each migration `db-push.sh` takes away the EXECUTE that Postgres gives PUBLIC by default, and fails if `anon`/`authenticated` can still run one or a `SECURITY DEFINER` function has no `SET search_path`. A function the browser really calls (an RLS helper a browser policy uses, or an RPC that acts only as `auth.uid()`) goes on `BROWSER_FUNCTION_ALLOW` in `scripts/db-push.sh`, with its own `GRANT EXECUTE … TO authenticated` in the migration; never let one take a user id as a parameter. `npm test` checks the migrations for the same before you push.
 - **Views:** a view owned by `supabase_admin` runs with the owner's rights and bypasses RLS. Create every view `WITH (security_invoker = true)` (or `ALTER VIEW … SET (security_invoker = true)`), and grant it to browsers like a table.
-- **`db-push.sh` fails loudly** if any table is left without RLS, a browser role holds a write grant, a browser policy allows writes, or a browser SELECT policy has no matching `GRANT SELECT` (reads broken).
+- **`db-push.sh` fails loudly** if any table is left without RLS, a browser role holds a write grant, a browser policy allows writes, a function is open (above), or a browser read has no matching `GRANT SELECT` or calls a function its role can't run (reads broken).
 
 ### Existing projects adopting the new `db-push.sh`
 
@@ -87,13 +87,13 @@ GRANT SELECT ON <schema>.posts, <schema>.categories TO anon, authenticated;  -- 
 -- Drop any browser write policy (INSERT/UPDATE/DELETE/ALL TO public, anon or authenticated)
 -- and any role-only read policy (TO authenticated USING (true)) on private tables.
 -- Also drop every SELECT policy on a table you did NOT grant back above, or db-push
--- step 7 ("READS BROKEN") fails: a browser policy with no grant means a broken read.
+-- step 8 ("READS BROKEN") fails: a browser policy with no grant means a broken read.
 -- DROP POLICY IF EXISTS <name> ON <schema>.<table>;
 
 COMMIT;
 ```
 
-Functions: Postgres lets PUBLIC run every new function, and a per-schema default can't change that. In the same migration, run `REVOKE ALL ON FUNCTION <schema>.<fn>(<args>) FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION <schema>.<fn>(<args>) TO service_role;` for each function. db-push step 6 fails if a SECURITY DEFINER function is still runnable by a browser role. The exception is an RLS helper that your browser SELECT policies call (for example `current_user_id()`): leave it runnable by `authenticated` and add its name to `BROWSER_DEFINER_ALLOW` at the top of `scripts/db-push.sh`.
+Functions: db-push revokes PUBLIC's default EXECUTE itself, but it never removes an explicit grant to `anon`/`authenticated` (and leaves alone any function a browser read needs), so step 7 fails until you decide. For each function the browser doesn't call, run `REVOKE ALL ON FUNCTION <schema>.<fn>(<args>) FROM PUBLIC, anon, authenticated; GRANT EXECUTE ON FUNCTION <schema>.<fn>(<args>) TO service_role;` in the same migration. For an RLS helper your browser policies call (for example `current_user_id()`) or an RPC that `sbAsUser()` calls, grant it to just the role that needs it and add its name to `BROWSER_FUNCTION_ALLOW` at the top of `scripts/db-push.sh` (it was `BROWSER_DEFINER_ALLOW`: carry your list over). Give every `SECURITY DEFINER` function, trigger functions included, `SET search_path = <schema>, pg_temp` (`ALTER FUNCTION … SET search_path = …`).
 
 Worked examples: `stopaids-site` `20261018125836_*.sql`, `naughty-nights-out` `20261018134026_*.sql`, `hearth` `20261018190000_*.sql` (RLS helpers on the allow list).
 
